@@ -1,124 +1,54 @@
 import os
-import random
-import cv2
 import joblib
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, classification_report
 from imblearn.over_sampling import SMOTE
-from sklearn.model_selection import cross_val_score, StratifiedKFold, train_test_split
-
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.random_projection import GaussianRandomProjection
+import matplotlib.pyplot as plt
 # Constants
-IMAGE_SIZE = (128, 128)
+FEATURES_FOLDERS = [
+    'Plant_leave_diseases_dataset_with_augmentation_feature_extracted',
+    'Plant_leave_diseases_dataset_without_augmentation_feature_extracted'
+]
 OVERSAMPLING_STRATEGY = "minority"
 RANDOM_STATE = 42
+TEST_SIZE = 0.2
+CV_FOLDS = 5
 
-def get_pixel(img, center, x, y):
-    try:
-        return 1 if img[x][y] >= center else 0
-    except IndexError:
-        return 0
-
-def lbp_calculated_pixel(img, x, y):
-    center = img[x][y]
-    val_ar = [
-        get_pixel(img, center, x-1, y-1),
-        get_pixel(img, center, x-1, y),
-        get_pixel(img, center, x-1, y + 1),
-        get_pixel(img, center, x, y + 1),
-        get_pixel(img, center, x + 1, y + 1),
-        get_pixel(img, center, x + 1, y),
-        get_pixel(img, center, x + 1, y-1),
-        get_pixel(img, center, x, y-1)
-    ]
-    power_val = [1, 2, 4, 8, 16, 32, 64, 128]
-    return sum(val_ar[i] * power_val[i] for i in range(len(val_ar)))
-
-def calculate_lbp_features(image):
-    rows, cols = image.shape
-    lbp_values = np.zeros_like(image, dtype=np.uint8)
-
-    for i in range(rows):
-        for j in range(cols):
-            lbp_values[i, j] = lbp_calculated_pixel(image, i, j)
-
-    return lbp_values.flatten()
-
-def extract_lbp_features(file_path):
-    try:
-        image = cv2.imread(file_path)
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray_image = cv2.resize(gray_image, IMAGE_SIZE)
-        lbp_features = calculate_lbp_features(gray_image)
-        return lbp_features
-
-    except Exception as e:
-        print(f"Error processing image {file_path}: {e}")
-        return None
-
-def load_dataset(folder_path, label):
-    features = []
-    labels = []
-
-    for filename in os.listdir(folder_path):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            file_path = os.path.join(folder_path, filename)
-            lbp_features = extract_lbp_features(file_path)
-
-            if lbp_features is not None:
-                features.append(lbp_features)
-                labels.append(label)
-
-    return features, labels
-
-def load_all_features_and_labels(folder_paths, samples_per_class=500):
+def load_features(folder_path, n_components=1500):
     all_features = []
     all_labels = []
-    total_images = 0
+    count = 0  # Initialize count of features
 
-    for folder_path in folder_paths:
-        print(f"Processing folder: {folder_path}")
-        num_images_in_folder = sum(1 for _ in os.listdir(folder_path) if _.lower().endswith(('.png', '.jpg', '.jpeg')))
-        total_images += num_images_in_folder
-        label = 1 if "healthy" in folder_path.lower() else 0
-        features, labels = load_dataset(folder_path, label)
+    for filename in os.listdir(folder_path):
+        if filename.lower().endswith('.pkl'):
+            file_path = os.path.join(folder_path, filename)
+            loaded_features = joblib.load(file_path)
+            count += len(loaded_features)  # Increment count by the number of features in the file
 
-        # Perform undersampling to limit the number of samples per class
-        if len(features) > samples_per_class:
-            selected_indices = random.sample(range(len(features)), samples_per_class)
-            features = [features[i] for i in selected_indices]
-            labels = [labels[i] for i in selected_indices]
+            # Apply random projection for dimensionality reduction
+            random_projection = GaussianRandomProjection(n_components=n_components, random_state=RANDOM_STATE)
+            reduced_features = random_projection.fit_transform(loaded_features)
 
-        all_features.extend(features)
-        all_labels.extend(labels)
+            if count == 1:
+                print_feature_info(reduced_features[0], filename)
 
-    print(f"Total number of images: {total_images}")
+            all_features.extend(reduced_features)
+            label = 0 if 'healthy' in filename.lower() else 1
+            all_labels.extend([label] * len(reduced_features))
+
+    print(f"Total number of features: {count}")
+
     return all_features, all_labels
 
-
-def train_knn_model(features, labels, n_neighbors=3, weights='distance', metric='euclidean', test_size=0.2, cv=5, random_state=RANDOM_STATE):
-    print(f"n_neighbors={n_neighbors}, weights={weights}, metric={metric}")
-
-
-    # Oversampled the features by multiplying the original value with a number between 0 and 1
-    smote = SMOTE(sampling_strategy=OVERSAMPLING_STRATEGY, random_state=random_state)
-    features, labels = smote.fit_resample(features, labels)
-
-
-    # Standardize the features
-    scaler = StandardScaler()
-    features = scaler.fit_transform(np.array(features))
-
+def train_knn_model(X_train, y_train, n_neighbors=7, weights='distance', metric='euclidean', random_state=RANDOM_STATE):
     # Initialize KNN model
     knn_model = KNeighborsClassifier(n_neighbors=n_neighbors, weights=weights, metric=metric)
 
-    # Stratified K-Fold cross-validation
-    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
-
-    # Split the data into training and testing sets before oversampling
-    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=test_size,
-                                                        random_state=random_state)
+    # Initialize Stratified K-Fold cross-validation
+    skf = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=random_state)
 
     # Cross-validated scores
     cross_val_scores = cross_val_score(knn_model, X_train, y_train, cv=skf)
@@ -126,78 +56,121 @@ def train_knn_model(features, labels, n_neighbors=3, weights='distance', metric=
     print(f"Cross-Validation Scores: {cross_val_scores}")
     print(f"Mean Cross-Validation Score: {np.mean(cross_val_scores):.2f}")
 
-    # Train the KNN model on the entire resampled and standardized training set
-    knn_model.fit(X_train, y_train)
+    # Oversampling the training data using SMOTE
+    smote = SMOTE(sampling_strategy=OVERSAMPLING_STRATEGY, random_state=random_state)
+    X_train_oversampled, y_train_oversampled = smote.fit_resample(X_train, y_train)
+    # Visualize feature distribution before and after SMOTE
+   # plot_feature_scatter(np.array(X_train), np.array(y_train), np.array(X_train_oversampled),
+    #                     np.array(y_train_oversampled), title='Feature Distribution Before and After SMOTE')
 
-    display_model_performance(knn_model, X_test, y_test)
+    # Train the KNN model
+    knn_model.fit(X_train_oversampled, y_train_oversampled)
 
-    return knn_model, scaler
+    return knn_model
 
 
-def display_model_performance(knn_model, X_test_normalized, y_test):
-    y_prediction = knn_model.predict(X_test_normalized)
+def plot_feature_scatter(X_before, y_before, X_after, y_after, title):
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.scatter(X_before[:, 0], X_before[:, 1], c=y_before, cmap=plt.cm.Paired, label='Before SMOTE')
+    plt.title('Before SMOTE')
+    plt.xlabel('Feature 1')
+    plt.ylabel('Feature 2')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.scatter(X_after[:, 0], X_after[:, 1], c=y_after, cmap=plt.cm.Paired, label='After SMOTE')
+    plt.title('After SMOTE')
+    plt.xlabel('Feature 1')
+    plt.ylabel('Feature 2')
+    plt.legend()
+
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+def display_model_performance(knn_model, X_test, y_test):
+    y_prediction = knn_model.predict(X_test)
+    y_proba = knn_model.predict_proba(X_test)[:, 1]  # Probabilities for positive class
     print("Classification Report:")
     print(classification_report(y_test, y_prediction))
     print("Confusion Matrix:")
     print(confusion_matrix(y_test, y_prediction))
-    accuracy = knn_model.score(X_test_normalized, y_test)
+    accuracy = knn_model.score(X_test, y_test)
     print(f"\nAccuracy: {accuracy:.2f}")
 
+    # Calculate ROC curve
+   # fpr, tpr, thresholds = roc_curve(y_test, y_proba)
 
+    # Calculate AUC
+    # auc = roc_auc_score(y_test, y_proba)
+    # print(f"AUC: {auc:.2f}")
+    #
+    # # Plot ROC curve
+    # plt.figure(figsize=(8, 6))
+    # plt.plot(fpr, tpr, color='blue', label=f'ROC Curve (AUC = {auc:.2f})')
+    # plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+    # plt.xlabel('False Positive Rate')
+    # plt.ylabel('True Positive Rate')
+    # plt.title('Receiver Operating Characteristic (ROC) Curve')
+    # plt.legend(loc='lower right')
+    # plt.show()
 
-def save_model_and_scaler(knn_model, scaler, model_filename='knn_model_3.pkl', scaler_filename='scaler.pkl'):
-    try:
-        joblib.dump(knn_model, model_filename)
-        joblib.dump(scaler, scaler_filename)
-        print(f"Model and scaler saved successfully.")
-    except Exception as e:
-        print(f"Error saving model and scaler: {e}")
+def save_model(model, filename='knn_model_binary.joblib'):
+    joblib.dump(model, filename)
+    print(f"Model saved as {filename}")
 
+def print_feature_info(feature, feature_name):
+    # Get the size of the feature
+    size = feature.nbytes  # Size in bytes
+
+    # Calculate the storage space
+    storage_space = size / (1024 * 1024)  # Convert bytes to megabytes
+
+    print(f"Feature Information for '{feature_name}':")
+    print(f"Size: {size} bytes")
+    print(f"Storage Space: {storage_space:.2f} MB")
+    print(f"Shape: {feature.shape}")
+    print(f"Dtype: {feature.dtype}")
 
 def main():
-    folder_paths = [
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Apple___Apple_scab',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Apple___healthy',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Corn___healthy',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Corn___Common_rust',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Pepper,_bell___Bacterial_spot',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Pepper,_bell___healthy',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Potato___Early_blight',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Potato___healthy',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Tomato___healthy',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Tomato___Late_blight',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Grape___Black_rot',
-        'dataset/extracted_without_augmentation/Plant_leave_diseases_dataset_without_augmentation/Grape___healthy',
+    all_features = []
+    all_labels = []
 
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Apple___Apple_scab',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Apple___healthy',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Corn___healthy',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Corn___Common_rust',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Pepper,_bell___Bacterial_spot',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Potato___healthy',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Potato___Early_blight',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Pepper,_bell___healthy',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Tomato___healthy',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Tomato___Late_blight',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Grape___Black_rot',
-        'dataset/extracted_with_augmentation/Plant_leave_diseases_dataset_with_augmentation/Grape___healthy'
+    for folder in FEATURES_FOLDERS:
+        print(f"Processing folder: {folder}")
+        # Load features and labels with random projection
+        features, labels = load_features(folder)  # Specify the number of components
 
-    ]
+        # Concatenate features and labels
+        all_features.extend(features)
+        all_labels.extend(labels)
 
-    all_features, all_labels = load_all_features_and_labels(folder_paths)
-
-    if not all_features:
+    if len(all_features) == 0:
         print("No features extracted. Check the dataset and feature extraction process.")
         return
-
-    # train the knn model and get the knn model and the scaler model
-    knn_model, scaler= train_knn_model( all_features, all_labels)
-
-    # Save the trained model and scaler
-    save_model_and_scaler(knn_model, scaler)
-
+    
+    feature_lengths = [len(feature) for feature in all_features]
+    if len(set(feature_lengths)) != 1:
+        print("Inconsistent feature vector lengths:", set(feature_lengths))
+        return
 
 
-# Execute the main function
+    # Split data into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(all_features, all_labels, test_size=TEST_SIZE,
+                                                        random_state=RANDOM_STATE)
+
+    # Train a KNN model
+    print("Training KNN model...")
+    knn_model = train_knn_model(X_train, y_train)
+
+    # Display model performance on a test set
+    print("Model Performance on Test Set:")
+    display_model_performance(knn_model, X_test, y_test)
+
+    # Save the trained model
+    save_model(knn_model)
+
 if __name__ == "__main__":
     main()
